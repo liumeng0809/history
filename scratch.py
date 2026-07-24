@@ -1,10 +1,28 @@
+import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 import httpx
 from docx import Document
 from docx.shared import Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+
+# 解析 **加粗** 行内标记；非贪婪，避免跨段误吞
+_BOLD_RE = re.compile(r'\*\*(.+?)\*\*')
+
+
+def add_runs_with_bold(paragraph, text):
+    """把含 **加粗** 的文本拆成多个 run，加粗部分 bold=True。"""
+    pos = 0
+    for m in _BOLD_RE.finditer(text):
+        if m.start() > pos:
+            paragraph.add_run(text[pos:m.start()])
+        run = paragraph.add_run(m.group(1))
+        run.bold = True
+        pos = m.end()
+    if pos < len(text):
+        paragraph.add_run(text[pos:])
 
 # ================= 配置区域 =================
 # 把这里替换成你刚才在硅基流动复制的 API 密钥
@@ -93,7 +111,8 @@ def markdown_to_word(md_content, topic):
             elif line.startswith('# '):
                 doc.add_heading(line[2:].strip(), level=0)
             else:
-                doc.add_paragraph(line)
+                para = doc.add_paragraph()
+                add_runs_with_bold(para, line)
         if sec.strip():
             doc.add_paragraph()  # 章节间空行
 
@@ -109,19 +128,29 @@ if __name__ == "__main__":
     # 将大纲按行分割成列表，并过滤掉空行
     outline_lines = [line.strip() for line in outline.split('\n') if line.strip()]
 
-    # 2. 遍历大纲，逐个扩写
+    # 2. 并行扩写所有大纲条目（大幅加速整体等待时间）
     all_details = ""
     total = len(outline_lines)
-    for i, line in enumerate(outline_lines):
-        # 去掉大纲前面可能有的序号符号，让标题更干净
-        clean_line = line.lstrip('0123456789.-* ')
-        if not clean_line:
-            continue
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        fut_to_idx = {}
+        for i, line in enumerate(outline_lines):
+            clean_line = line.lstrip('0123456789.-* ')
+            if not clean_line:
+                continue
+            fut = pool.submit(generate_section_details, clean_line)
+            fut_to_idx[fut] = i
 
-        print(f"\n[{i + 1}/{total}] 正在处理大纲第 {i + 1} 部分...")
-        detail = generate_section_details(clean_line)
-        all_details += f"{detail}\n\n---\n\n"  # 用分隔线分开每一节
-        time.sleep(1)  # 稍微停顿1秒，防止调用API太快被限制
+        results = {}
+        for fut in as_completed(fut_to_idx):
+            i = fut_to_idx[fut]
+            try:
+                results[i] = fut.result()
+            except Exception as e:
+                print(f"\n   ↳ 大纲第 {i + 1} 部分出错: {e}")
+        # 按原始顺序拼接
+        for i in sorted(results):
+            print(f"  [{i + 1}/{total}] {outline_lines[i][:40]}...✔")
+            all_details += f"{results[i]}\n\n---\n\n"
 
     # 3. 合并生成 Word
     markdown_to_word(all_details, TOPIC)
