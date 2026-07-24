@@ -14,15 +14,20 @@ _BOLD_RE = re.compile(r'\*\*(.+?)\*\*')
 
 def add_runs_with_bold(paragraph, text):
     """把含 **加粗** 的文本拆成多个 run，加粗部分 bold=True。"""
-    pos = 0
-    for m in _BOLD_RE.finditer(text):
-        if m.start() > pos:
-            paragraph.add_run(text[pos:m.start()])
-        run = paragraph.add_run(m.group(1))
-        run.bold = True
-        pos = m.end()
-    if pos < len(text):
-        paragraph.add_run(text[pos:])
+    # 对有 ** 成对出现的段落，保留加粗；对未配对的 ** 标记直接清除
+    if text.count('**') >= 2:
+        # 正常解析成对 **
+        pos = 0
+        for m in _BOLD_RE.finditer(text):
+            if m.start() > pos:
+                paragraph.add_run(text[pos:m.start()])
+            run = paragraph.add_run(m.group(1))
+            run.bold = True
+            pos = m.end()
+        if pos < len(text):
+            paragraph.add_run(text[pos:])
+    else:
+        paragraph.add_run(text.replace('**', ''))
 
 # ================= 配置区域 =================
 # 把这里替换成你刚才在硅基流动复制的 API 密钥
@@ -30,7 +35,7 @@ API_KEY = "sk-Qaes2KCUDHr67GZoif13ySqsuFsD7NYWAnLoVcNcAlv3mcXW"
 # 大模型名称（硅基流动的免费强模型）
 MODEL_NAME = "DeepSeek-V4-Flash"
 # 你想生成的科普主题
-TOPIC = "东晋历史"
+TOPIC = "南北朝时期宋历史"
 # ============================================
 
 # 初始化大模型客户端
@@ -93,9 +98,11 @@ def markdown_to_word(md_content, topic):
     style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
     style.font.size = Pt(12)
 
-    # 大标题
-    title = doc.add_heading(f"{topic}详细科普", level=0)
+    # 大标题（用 Heading 1 样式 + 居中对齐 + 加大字号）
+    title = doc.add_heading(f"{topic}详细科普", level=1)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        run.font.size = Pt(22)
 
     # 按 Markdown 的分隔线切分章节，逐块解析
     sections = md_content.split('\n---\n')
