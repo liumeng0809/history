@@ -1,9 +1,10 @@
-import os
 import time
-import markdown
-import pdfkit
 from openai import OpenAI
 import httpx
+from docx import Document
+from docx.shared import Pt
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
 
 # ================= 配置区域 =================
 # 把这里替换成你刚才在硅基流动复制的 API 密钥
@@ -62,48 +63,43 @@ def generate_section_details(outline_line):
     return call_ai(prompt)
 
 
-def markdown_to_pdf(md_content, topic):
-    """第三步：合并并转为 PDF"""
-    print("\n第三阶段：正在生成 PDF 文档...")
+def markdown_to_word(md_content, topic):
+    """第三步：合并并转为 Word 文档"""
+    print("\n第三阶段：正在生成 Word 文档...")
 
-    # 加上大标题
-    full_md = f"# {topic}详细科普\n\n{md_content}"
+    doc = Document()
 
-    # 转 HTML
-    html_body = markdown.markdown(full_md)
+    # 设置正文中文字体（默认字体不含中文会显示异常）
+    style = doc.styles['Normal']
+    style.font.name = 'Microsoft YaHei'
+    style.element.rPr.rFonts.set(qn('w:eastAsia'), 'Microsoft YaHei')
+    style.font.size = Pt(12)
 
-    # 添加美观的 CSS 样式
-    css = """
-    <style>
-        body { font-family: "Microsoft YaHei", "PingFang SC", sans-serif; line-height: 1.8; padding: 40px; max-width: 800px; margin: auto; }
-        h1 { color: #2c3e50; text-align: center; border-bottom: 2px solid #3498db; padding-bottom: 15px; }
-        h3 { color: #2980b9; margin-top: 30px; border-left: 5px solid #3498db; padding-left: 10px; }
-        p { text-align: justify; font-size: 16px; }
-        strong { color: #c0392b; }
-    </style>
-    """
-    full_html = f"<html><head><meta charset='UTF-8'>{css}</head><body>{html_body}</body></html>"
+    # 大标题
+    title = doc.add_heading(f"{topic}详细科普", level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
-    # 保存临时 HTML
-    html_file = f"{topic}_temp.html"
-    with open(html_file, "w", encoding="utf-8") as f:
-        f.write(full_html)
+    # 按 Markdown 的分隔线切分章节，逐块解析
+    sections = md_content.split('\n---\n')
+    for sec in sections:
+        for line in sec.splitlines():
+            line = line.rstrip()
+            if not line:
+                continue
+            if line.startswith('### '):
+                doc.add_heading(line[4:].strip(), level=2)
+            elif line.startswith('## '):
+                doc.add_heading(line[3:].strip(), level=1)
+            elif line.startswith('# '):
+                doc.add_heading(line[2:].strip(), level=0)
+            else:
+                doc.add_paragraph(line)
+        if sec.strip():
+            doc.add_paragraph()  # 章节间空行
 
-    # 转为 PDF
-    pdf_file = f"{topic}_详细科普.pdf"
-    options = {
-        'encoding': "UTF-8",
-        'page-size': 'A4',
-        'margin-top': '20mm',
-        'margin-bottom': '20mm',
-    }
-
-    try:
-        pdfkit.from_file(html_file, pdf_file, options=options)
-        print(f"\n🎉 恭喜！成功生成PDF: {pdf_file}")
-        os.remove(html_file)  # 删除临时文件
-    except Exception as e:
-        print(f"PDF 生成失败，错误信息: {e}")
+    word_file = f"{topic}_详细科普.docx"
+    doc.save(word_file)
+    print(f"\n🎉 恭喜！成功生成Word: {word_file}")
 
 
 if __name__ == "__main__":
@@ -127,6 +123,6 @@ if __name__ == "__main__":
         all_details += f"{detail}\n\n---\n\n"  # 用分隔线分开每一节
         time.sleep(1)  # 稍微停顿1秒，防止调用API太快被限制
 
-    # 3. 合并生成 PDF
-    markdown_to_pdf(all_details, TOPIC)
-    print("\n全流程结束！请去当前文件夹查看你的 PDF 文件。")
+    # 3. 合并生成 Word
+    markdown_to_word(all_details, TOPIC)
+    print("\n全流程结束！请去当前文件夹查看你的 Word 文件。")
