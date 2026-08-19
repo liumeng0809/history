@@ -12,6 +12,8 @@
 用法：只改下面 TOPIC 一行，填你想讲的朝代/政权名（如"唐朝历史""宋朝历史""罗马帝国"），运行即可。
 """
 import re
+import time
+import openai
 from openai import OpenAI
 import httpx
 
@@ -23,14 +25,14 @@ from docx.oxml.ns import qn
 # ================= 配置区域 =================
 API_KEY = "sk-Qaes2KCUDHr67GZoif13ySqsuFsD7NYWAnLoVcNcAlv3mcXW"
 MODEL_NAME = "DeepSeek-V4-Flash"
-TOPIC = "东晋国历史"   # ← 只改这里：填你想讲的朝代/政权名
+TOPIC = "五胡十六国历史"   # ← 只改这里：填你想讲的朝代/政权名
 # ============================================
 
 client = OpenAI(
     api_key=API_KEY,
     base_url="http://aiserver.hisi.huawei.com/v1",
     # 绕过 Windows 注册表里的 IE 系统代理（华为 proxycn2:8080），否则 504
-    http_client=httpx.Client(trust_env=False)
+    http_client=httpx.Client(trust_env=False, timeout=httpx.Timeout(timeout=300.0, connect=30.0))
 )
 
 _BOLD_RE = re.compile(r'\*\*(.+?)\*\*')
@@ -52,16 +54,27 @@ def add_runs_with_bold(paragraph, text):
         paragraph.add_run(text.replace('**', ''))
 
 
-def call_ai(prompt, max_tokens=8000):
-    """调用大模型的通用函数。max_tokens 可按需调高，防止长正文被截断。"""
-    print("  思考中...", end="", flush=True)
-    response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{"role": "user", "content": prompt}],
-        max_tokens=max_tokens
-    )
-    print("完成!", flush=True)
-    return response.choices[0].message.content
+def call_ai(prompt, max_tokens=30000, max_retries=5):
+    """调用大模型的通用函数。max_tokens 可按需调高，防止长正文被截断。
+    内置超时重试：最多重试 max_retries 次，每次退避等待。不传 timeout 参数，
+    由 httpx.Client 全局控制（300秒），避免 create() 中的 timeout 覆盖全局设置。"""
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  思考中...(尝试 {attempt}/{max_retries})", end="", flush=True)
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens
+            )
+            print("完成!", flush=True)
+            return response.choices[0].message.content
+        except openai.APITimeoutError:
+            wait = 10 * attempt  # 退避：10s, 20s, 30s, ...
+            print(f"超时，{wait}秒后重试...", flush=True)
+            if attempt < max_retries:
+                time.sleep(wait)
+            else:
+                raise
 
 
 # ---- 第一步：朝代背景总览（全局事实基线）----
@@ -141,7 +154,7 @@ def generate_stage_outline(topic, overview, stage_no, stage_name, stage_years, s
 本阶段核心：{stage_summary}
 {prior_hint}
 要求：
-1. 列出本阶段必须讲到的【完整历史事件】，按时间顺序排列，通常 6-8 个事件为宜（不要超过 8 个，否则单阶段篇幅过大易截断）。
+1. 列出本阶段必须讲到的【完整历史事件】，按时间顺序排列，通常 8-12 个事件为宜（不要超过 12 个）。把该讲的波折节点都列出来，不要为了精简而砍掉细节——单文件超长由代码自动拆分多文件处理，这里只管列全。
 2. 【严格守本阶段年代范围——重要】本阶段年代范围是【{stage_years}】。只能列起始年份落在这个范围内的（含两端）事件；
    不得把发生在本阶段【之后】的事件塞进来（如本阶段到322年结束，就不得列323、324年的事件，那是下一阶段的内容）。
 3. 【以时间线为准——重要】每个事件是时间线上的一个独立节点，按发生时间严格递进，沿时间线往前讲。
@@ -265,7 +278,11 @@ def review_all_outlines(topic, overview, stages_with_outlines):
 - 若某阶段无需修改，原样输出该阶段。
 """
     print("\n校验全部大纲中（AI 全局自检自修）...")
-    raw = call_ai(prompt)
+    try:
+        raw = call_ai(prompt, max_tokens=20000, max_retries=3)
+    except openai.APITimeoutError:
+        print("  ⚠️ 大纲校验超时，沿用生成的大纲（未校验）。")
+        return stages_with_outlines
 
     # 解析 AI 返回，按"第N阶段｜"标题分段
     reviewed = []
@@ -357,9 +374,10 @@ def generate_section_details(topic, stage_name, stage_years, event, point, event
 要点概述：{point}
 
 要求：
-1. 字数不少于 800 字。
+1. 字数不少于 1500 字。
 2. 把这个事件讲透：必须含具体年份、人物、经过；
-   要讲清它的起因（为什么会发生）、经过（怎么发展的）、结果（最后怎样），
+   要讲清它的起因→发展→**波折或受挫**（很少有一帆风顺的事，讲出它卡在哪、难在哪、出过什么岔子）→**转折**（怎么破局/反转）→结果，
+   让读者看到事件的"一波三折"，而不是平铺直叙一句话带过。
    结果之后再用一两句话点明"这件事把朝代推进到了什么状态、引向了下一步什么局面"——这是本朝代的【脉络推进】，不是宏观影响评述。
    让小白听完能完整理解这件事的前因后果，并看清它在朝代发展链条上的位置。
 3. 若该事件的背景在前面条目已交代过，本条一句话带过或不提，不要把已讲过的内容当背景再重讲一遍。
@@ -479,7 +497,11 @@ def review_section_text(topic, stage_name, md_content):
 - 务必输出完整全文，不要省略、不要用"……（后略）"代替。
 """
     print("  校验正文（AI 自检自修）...")
-    revised = call_ai(prompt, max_tokens=12000)
+    try:
+        revised = call_ai(prompt, max_tokens=20000, max_retries=3)
+    except openai.APITimeoutError:
+        print("  ⚠️ 校验超时，沿用原文（未校验）。")
+        return md_content
     # 兜底：若返回明显过短或无 ### 标题，视为解析失败，沿用原文
     if not revised or len(revised) < len(md_content) * 0.5 or '###' not in revised:
         print("  ⚠️ AI 正文校验返回异常，沿用原文。")
@@ -566,11 +588,28 @@ if __name__ == "__main__":
             prev_tail = get_tail(detail)  # 跨阶段衔接不断
             print(f"    ✔ [{year_start}年] {event[:30]}... {len(detail)}字")
 
-        # 4.2 本阶段扩写完，先 AI 校验正文（自检重复/史实/时间错位/前情回顾），再落盘 Word
-        chunk_md = "\n\n---\n\n".join(buffer)
-        chunk_md = review_section_text(TOPIC, stage_name, chunk_md)
+        # 4.2 本阶段扩写完，按事件数拆分批次（每批≤8事件），每批校验后落盘一个 Word
+        #    超8事件的阶段自动拆成多个文件（上/中/下/续一/续二/续三），单文件不超长、不截断
+        MAX_EVENTS_PER_FILE = 8
+        n = len(items)
+        batch_count = (n + MAX_EVENTS_PER_FILE - 1) // MAX_EVENTS_PER_FILE  # 向上取整
+        suffixes = ["上", "中", "下", "续一", "续二", "续三"]
+        if batch_count > 1:
+            print(f"  本阶段共 {n} 个事件，拆分为 {batch_count} 个文件：")
         topic_short = TOPIC.replace("历史", "").strip() or TOPIC
-        file_label = f"{topic_short}_{stage_no}_{safe_filename(stage_name)}"
-        markdown_to_word(chunk_md, file_label)
+        for batch_idx in range(batch_count):
+            start = batch_idx * MAX_EVENTS_PER_FILE
+            end = min(start + MAX_EVENTS_PER_FILE, n)
+            batch_buffer = buffer[start:end]
+            if batch_count > 1:
+                print(f"    文件 {batch_idx + 1}/{batch_count}（事件 {start + 1}-{end}）...")
+            chunk_md = "\n\n---\n\n".join(batch_buffer)
+            chunk_md = review_section_text(TOPIC, stage_name, chunk_md)  # 按子文件分批校验
+            if batch_count > 1:
+                suffix = suffixes[batch_idx] if batch_idx < len(suffixes) else f"续{batch_idx - 2}"
+                file_label = f"{topic_short}_{stage_no}_{safe_filename(stage_name)}_{suffix}"
+            else:
+                file_label = f"{topic_short}_{stage_no}_{safe_filename(stage_name)}"
+            markdown_to_word(chunk_md, file_label)
 
-    print(f"\n全流程结束！请去当前文件夹查看 {len(stages)} 个 Word 文件。")
+    print(f"\n全流程结束！请去当前文件夹查看生成的 Word 文件。")
